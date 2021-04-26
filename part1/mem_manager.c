@@ -7,14 +7,75 @@ struct PTE {
     int dirty;
 };
 
+struct TLBE {
+    int page_no;
+    struct PTE pte;
+};
+
+struct PageTable {
+    struct PTE * table;
+    int next_free_frame;
+    int num_faults;
+};
+
+// FifoTlb
+struct TlbFifo {
+    struct TLBE * tlb;
+    int first;
+    int size;
+    int num_hits;
+};
+
 const int NUM_PAGES = 256; //2^8 entries in page table
 const int PAGE_SIZE = 256;
+const int NUM_TLB_ENTRIES = 16;
 
-int update_page_table(int logical_pg, struct PTE* page_table,
-                      char* physical_mem, FILE* bfp,
-                      int next_free_frame) {
-    //translate page to frame
-    if(!page_table[logical_pg].valid) {
+int tlb_find_entry(int logical_pg, struct TlbFifo* tlb_table) {
+    //check tlb in circular fashion
+    struct TLBE * tlb = tlb_table->tlb;
+    for(int i = 0; i < tlb_table->size; i++) {
+        int index = (tlb_table->first + i) % NUM_TLB_ENTRIES;
+        if(tlb[index].pte.valid && tlb[index].page_no == logical_pg) {
+            return index;
+        }
+    }
+    return -1;
+}
+
+struct TLBE tlb_add_entry(int logical_pg, struct PTE pte, struct TlbFifo* tlb_table) {
+    int index = (tlb_table->first + tlb_table->size) % NUM_TLB_ENTRIES;
+    struct TLBE old = tlb_table->tlb[index];
+    tlb_table->tlb[index].page_no = logical_pg;
+    tlb_table->tlb[index].pte = pte;
+    // update circular buffer
+    if (tlb_table->size < NUM_TLB_ENTRIES) {
+        tlb_table->size++;
+    } else {
+        tlb_table->first = (tlb_table->first + 1) % NUM_TLB_ENTRIES;
+    }
+    return old;
+}
+
+struct TLBE* tlb_get_last_entry(struct TlbFifo* tlb_table) {
+    int index = (tlb_table->first + tlb_table->size - 1) % NUM_TLB_ENTRIES;
+    return &tlb_table->tlb[index];
+}
+
+struct PTE* get_table_entry(int logical_pg,
+                           struct TlbFifo* tlb_table,
+                           struct PageTable* page_table,
+                           char* physical_mem, FILE* bfp) {
+    
+    int tlb_index = tlb_find_entry(logical_pg, tlb_table);
+    if (tlb_index >= 0) {
+        // found
+        tlb_table->num_hits++;
+        return &tlb_table->tlb[tlb_index].pte;
+    }
+    
+    // tlb did not find logical page
+    // translate from page table to frame
+    if(!page_table->table[logical_pg].valid) {
         //page fault
         //read in logical_pg from BACKING STORE and store in a
         //pg frame in physical memory
@@ -24,19 +85,24 @@ int update_page_table(int logical_pg, struct PTE* page_table,
         //printf("Reading from page %d(%d) to frame %d(%d)\n",
         //       logical_pg, read_at, next_free_frame, read_to);
         fseek(bfp, logical_pg * PAGE_SIZE, SEEK_SET);
-        fread(physical_mem + next_free_frame * PAGE_SIZE, PAGE_SIZE,
-              1, bfp);
-        page_table[logical_pg].frame_no = next_free_frame++;
-        page_table[logical_pg].valid = 1;
+        fread(physical_mem + page_table->next_free_frame * PAGE_SIZE,
+              PAGE_SIZE, 1, bfp);
+        page_table->table[logical_pg].frame_no = page_table->next_free_frame++;
+        page_table->table[logical_pg].valid = 1;
+        page_table->num_faults++;
     }
-    return next_free_frame;
+    
+    //update tlb
+    struct TLBE old_tlb_entry = tlb_add_entry(logical_pg, page_table->table[logical_pg], tlb_table);
+    // if removed tlb entry is dirty, we update page table
+    if (old_tlb_entry.pte.dirty) {
+        page_table->table[old_tlb_entry.page_no].dirty = 1;
+    }
+    
+    return &tlb_get_last_entry(tlb_table)->pte;
 }
 
 int main (int argc, char** argv) {
- 
-    //page table using PTE as the data type
-    //struct PTE pageTable[SIZE];
-    
     
     //default filename
     char* addresses_fname = "addresses.txt";
@@ -63,12 +129,20 @@ int main (int argc, char** argv) {
         exit(-1);
     }
     
-    
+    //create TLB
+    struct TlbFifo tlb_fifo;
+    tlb_fifo.tlb = (struct TLBE *) calloc(NUM_TLB_ENTRIES, sizeof(struct TLBE));
+    tlb_fifo.first = 0;
+    tlb_fifo.size = 0;
+    tlb_fifo.num_hits = 0;
+
     //create page table
-    struct PTE* page_table = (struct PTE *) calloc(NUM_PAGES, sizeof(struct PTE));
+    struct PageTable page_table;
+    page_table.table = (struct PTE *) calloc(NUM_PAGES, sizeof(struct PTE));
+    page_table.next_free_frame = 0;
+    page_table.num_faults = 0;
     //create physical memory
     char* physical_mem = (char *) malloc(NUM_PAGES * PAGE_SIZE);
-    int next_free_frame = 0;
     
     //read integers from file
     int entry;
@@ -82,22 +156,20 @@ int main (int argc, char** argv) {
         int offset = logical_addr & 0xFF;
         int logical_pg = (logical_addr >> 8) & 0xFF;
         
-        next_free_frame = update_page_table(logical_pg, page_table,
-                                            physical_mem, bfp,
-                                            next_free_frame);
-        int physical_addr =
-            page_table[logical_pg].frame_no * PAGE_SIZE + offset;
+        struct PTE* pte = get_table_entry(logical_pg, &tlb_fifo, &page_table,
+                                          physical_mem, bfp);
+        int physical_addr = pte->frame_no * PAGE_SIZE + offset;
         if(write_bit) {
             // page is dirty
             physical_mem[physical_addr]++;
-            page_table[logical_pg].dirty = 1;
+            pte->dirty = 1;
         }
         
         printf("0x%04X 0x%04X %d %d\n",
                logical_addr,
                physical_addr,
                (int) physical_mem[physical_addr],
-               page_table[logical_pg].dirty);
+               pte->dirty);
         
         fscanf(afp, "%d", &entry);
         //fflush(stdout);
