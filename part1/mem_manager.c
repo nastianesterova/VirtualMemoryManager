@@ -30,7 +30,7 @@ const int NUM_PAGES = 256; //2^8 entries in page table
 const int PAGE_SIZE = 256;
 const int NUM_TLB_ENTRIES = 16;
 
-int tlb_find_entry(int logical_pg, struct TlbFifo* tlb_table) {
+int tlb_find_entry(struct TlbFifo* tlb_table, int logical_pg) {
     //check tlb in circular fashion
     struct TLBE * tlb = tlb_table->tlb;
     for(int i = 0; i < tlb_table->size; i++) {
@@ -42,7 +42,7 @@ int tlb_find_entry(int logical_pg, struct TlbFifo* tlb_table) {
     return -1;
 }
 
-struct TLBE tlb_add_entry(int logical_pg, struct PTE pte, struct TlbFifo* tlb_table) {
+struct TLBE tlb_add_entry(struct TlbFifo* tlb_table, int logical_pg, struct PTE pte) {
     int index = (tlb_table->first + tlb_table->size) % NUM_TLB_ENTRIES;
     struct TLBE old = tlb_table->tlb[index];
     tlb_table->tlb[index].page_no = logical_pg;
@@ -61,12 +61,13 @@ struct TLBE* tlb_get_last_entry(struct TlbFifo* tlb_table) {
     return &tlb_table->tlb[index];
 }
 
+
 struct PTE* get_table_entry(int logical_pg,
                            struct TlbFifo* tlb_table,
                            struct PageTable* page_table,
                            char* physical_mem, FILE* bfp) {
     
-    int tlb_index = tlb_find_entry(logical_pg, tlb_table);
+    int tlb_index = tlb_find_entry(tlb_table, logical_pg);
     if (tlb_index >= 0) {
         // found
         tlb_table->num_hits++;
@@ -93,7 +94,7 @@ struct PTE* get_table_entry(int logical_pg,
     }
     
     //update tlb
-    struct TLBE old_tlb_entry = tlb_add_entry(logical_pg, page_table->table[logical_pg], tlb_table);
+    struct TLBE old_tlb_entry = tlb_add_entry(tlb_table, logical_pg, page_table->table[logical_pg]);
     // if removed tlb entry is dirty, we update page table
     if (old_tlb_entry.pte.dirty) {
         page_table->table[old_tlb_entry.page_no].dirty = 1;
