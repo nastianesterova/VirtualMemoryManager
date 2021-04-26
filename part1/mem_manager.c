@@ -146,8 +146,11 @@ int main (int argc, char** argv) {
     
     //read integers from file
     int entry;
+    int num_entries = 0;
+    int num_dirty = 0;
     fscanf(afp, "%d", &entry);
     while (!feof(afp)) {
+        ++num_entries;
         //extract offset and page number
         //255 = 0xFF ends in 11111111 in binary
         int logical_addr = entry & 0xFFFF;
@@ -177,6 +180,13 @@ int main (int argc, char** argv) {
     
 	fclose(afp);
     fclose(bfp);
+    
+    printf("Page-fault rate: %f\n", page_table.num_faults / (double)num_entries);
+    printf("TLB hit rate: %f\n", tlb_fifo.num_hits / (double)num_entries);
+    for(int i = 0; i < NUM_PAGES; ++i) {
+        num_dirty += page_table.table[i].dirty;
+    }
+    printf("Number of dirty pages: %d\n", num_dirty);
     
 	return 0;
 }
