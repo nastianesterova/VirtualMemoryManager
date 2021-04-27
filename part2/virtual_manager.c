@@ -1,5 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <errno.h>
 
 struct PTE {
     int frame_no;
@@ -14,7 +16,7 @@ struct TLBE {
 
 struct PageTable {
     struct PTE * table;
-    int next_free_frame;
+    int next_frame;
     int num_faults;
 };
 
@@ -28,6 +30,7 @@ struct TlbFifo {
 
 const int NUM_PAGES = 256; //2^8 entries in page table
 const int PAGE_SIZE = 256;
+const int NUM_FRAMES = 128;
 const int NUM_TLB_ENTRIES = 16;
 
 /**
@@ -106,20 +109,73 @@ struct PTE* get_table_entry(int logical_pg,
     // tlb did not find logical page
     // translate from page table to frame
     if(!page_table->table[logical_pg].valid) {
-        //page fault
-        //read in logical_pg from BACKING STORE and store in a
-        //pg frame in physical memory
-        //DEBUG CODE BELOW
-        //int read_at = logical_pg * PAGE_SIZE;
-        //int read_to = next_free_frame * PAGE_SIZE;
-        //printf("Reading from page %d(%d) to frame %d(%d)\n",
-        //       logical_pg, read_at, next_free_frame, read_to);
+        //page fault: the entry in the page table at logical_pg is not valid
+        //read in logical_pg from BACKING STORE and store it in physical memory
+        //First, need to check if there is a free frame in physical memory
+        //If there are no free frames, must perform page replacement, aka:
+        //Replace one of the frames in physical memory with logical_pg that is read from the.
+        //BACKING STORE. Before replacing it, may need to write the frame in physical mem
+        //into the BACKING STORE - that is, if this frame has been modified since its last load.
+        //what characteristics does this frame have? The frame number itself and the page #
+        //associated with it
+        
+        //given fact that frame has 256 entries of logical pages
+        //and that logical page entry that we want, in page table, is invalid
+        
+        //go through table and check every frame number
+        
+        
+        //eventually will permanently run out of frames and will always need to replace (once
+        //the table is filled)
+        if(page_table->num_faults >= 128) { // there are no free frames in physical memory
+            //must perform page replacement
+            //page_table->next_frame is victim frame. It will be removed from physical memory
+            //if write bit == 1, will be written to BACKING STORE
+            //now there is a free frame (next_frame)
+            
+            //go through table and check every frame_no until you find page associated with frame_mo
+            for(int i = 0; i < NUM_PAGES; i++) {
+                if(page_table->table[i].frame_no == page_table->next_frame &&
+                   page_table->table[i].valid) { //found associate page #
+                    if(page_table->table[i].dirty) {
+                        //will need to write the frame to the BACKING STORE
+                        if(i == 0x57) {
+                            char x = *(physical_mem + page_table->next_frame * PAGE_SIZE + 0x9B);
+                            printf("Saving page 0x%02X frame 0x%02X value at 9B: %d\n", i,
+                                   page_table->next_frame,
+                                   (int)x);
+                        }
+                        fseek(bfp, i * PAGE_SIZE, SEEK_SET);
+                        int c = fwrite(physical_mem + page_table->next_frame * PAGE_SIZE,
+                                       PAGE_SIZE, 1, bfp);
+                        if (c < PAGE_SIZE) {
+                            fprintf(stderr, "Cannot write page: %s\n", strerror(errno));
+                            exit(-1);
+                        }
+                        page_table->table[i].dirty = 0;
+                    }
+                    //remove page_table->next_frame from physical memory
+                    page_table->table[i].valid = 0;
+                    page_table->table[i].frame_no = -1;
+                    break;
+                }
+            }
+        }
+
+        // We have a free frame to load page to
         fseek(bfp, logical_pg * PAGE_SIZE, SEEK_SET);
-        fread(physical_mem + page_table->next_free_frame * PAGE_SIZE,
+        fread(physical_mem + page_table->next_frame * PAGE_SIZE,
               PAGE_SIZE, 1, bfp);
-        page_table->table[logical_pg].frame_no = page_table->next_free_frame++;
+        if (logical_pg == 0x57) {
+            char x = *(physical_mem + page_table->next_frame * PAGE_SIZE + 0x9B);
+            printf("Loading page 0x%02X into frame 0x%02X value at 9B: %d\n", logical_pg,
+                   page_table->next_frame, (int)x);
+        }
+        page_table->table[logical_pg].frame_no = page_table->next_frame;
         page_table->table[logical_pg].valid = 1;
+        page_table->table[logical_pg].dirty = 0;
         page_table->num_faults++;
+        page_table->next_frame = (page_table->next_frame + 1) % NUM_FRAMES;
     }
     
     //update tlb
@@ -153,7 +209,7 @@ int main (int argc, char** argv) {
         exit(-1);
     }
     
-    FILE * bfp = fopen(back_store_fname, "rb");
+    FILE * bfp = fopen(back_store_fname, "w+");
     if(!bfp) {
         fprintf(stderr, "Binary store file failed to open! Exiting program...\n");
         exit(-1);
@@ -169,10 +225,13 @@ int main (int argc, char** argv) {
     //create page table
     struct PageTable page_table;
     page_table.table = (struct PTE *) calloc(NUM_PAGES, sizeof(struct PTE));
-    page_table.next_free_frame = 0;
+    page_table.next_frame = 0;
     page_table.num_faults = 0;
     //create physical memory
-    char* physical_mem = (char *) malloc(NUM_PAGES * PAGE_SIZE);
+    char* physical_mem = (char *) malloc(NUM_FRAMES * PAGE_SIZE); //TODO: physical mem is half of virtual
+    //char* head = physical_mem;
+    //char* tail = physical_mem + ((NUM_FRAMES-1) * PAGE_SIZE);
+    //printf("NEW PHYS_MEM_SIZE: %d\n", (NUM_FRAMES * PAGE_SIZE));
     
     //read integers from file
     int entry;
@@ -190,7 +249,9 @@ int main (int argc, char** argv) {
         int logical_pg = (logical_addr >> 8) & 0xFF;
         
         struct PTE* pte = get_table_entry(logical_pg, &tlb_fifo, &page_table, physical_mem, bfp);
-        int physical_addr = pte->frame_no * PAGE_SIZE + offset;
+        int physical_addr = (pte->frame_no * PAGE_SIZE + offset) % (NUM_FRAMES * PAGE_SIZE);//TODO: physical_addr can only reach half
+        //printf("Physical address: %d\n", physical_addr);
+        //TODO: need to use % above to loop back around in physical address
         
         if(write_bit) {
             // page is dirty
@@ -206,7 +267,6 @@ int main (int argc, char** argv) {
         
         fscanf(afp, "%d", &entry);
     }
-    
 	fclose(afp);
     fclose(bfp);
     
