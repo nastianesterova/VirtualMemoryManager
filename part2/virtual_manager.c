@@ -37,14 +37,9 @@ const int NUM_TLB_ENTRIES = 16;
 /**
  This function reads/writes pages to file
  */
-void read_write_page_data(void* memory, int page_num, int is_write, const char* filename) {
-    FILE * fh = fopen(filename, is_write ? "r+" : "r");
-    if (!fh) {
-        fprintf(stderr, "Cannot open file %s for %s\n", filename, is_write ? "writing" : "reading");
-        exit(-1);
-    }
+void read_write_page_data(void* memory, int page_num, int is_write, FILE * fh) {
     if (fseek(fh, page_num * PAGE_SIZE, SEEK_SET)) {
-        fprintf(stderr, "Cannot seek to %d in %s: %s\n", page_num * PAGE_SIZE, filename, strerror(errno));
+        fprintf(stderr, "Cannot seek to %d in %s: %s\n", page_num * PAGE_SIZE, fh, strerror(errno));
         exit(-1);
     }
 
@@ -52,18 +47,17 @@ void read_write_page_data(void* memory, int page_num, int is_write, const char* 
         // printf("Writing page 0x%04X\n", page_num * PAGE_SIZE);
         int c = fwrite(memory, PAGE_SIZE, 1, fh);
         if (c != 1) {
-            fprintf(stderr, "Cannot write to %s: %s\n", filename, strerror(errno));
+            fprintf(stderr, "Cannot write to %s: %s\n", fh, strerror(errno));
             exit(-1);
         }
     } else {
         // printf("Reading page 0x%04X\n", page_num * PAGE_SIZE);
         int c = fread(memory, PAGE_SIZE, 1, fh);
         if (c != 1) {
-            fprintf(stderr, "Cannot read from %s: %s\n", filename, strerror(errno));
+            fprintf(stderr, "Cannot read from %s: %s\n", fh, strerror(errno));
             exit(-1);
         }
     }
-    fclose(fh);
 }
 
 
@@ -160,7 +154,7 @@ struct PTE* get_table_entry(int logical_pg,
                            struct TlbFifo* tlb_table,
                            struct PageTable* page_table,
                            char* physical_mem,
-                           const char* back_store_fname) {
+                           FILE* back_store) {
     
     int tlb_index = tlb_find_entry(tlb_table, logical_pg);
     if (tlb_index >= 0) {
@@ -203,7 +197,7 @@ struct PTE* get_table_entry(int logical_pg,
                     if(page_table->table[i].dirty) {
                         //will need to write the frame to the BACKING STORE
                         read_write_page_data(physical_mem + page_table->next_frame * PAGE_SIZE,
-                                             i, 1, back_store_fname);
+                                             i, 1, back_store);
                         page_table->table[i].dirty = 0;
                     }
                     //remove page_table->next_frame from physical memory
@@ -218,7 +212,7 @@ struct PTE* get_table_entry(int logical_pg,
 
         // We have a free frame to load page to
         read_write_page_data(physical_mem + page_table->next_frame * PAGE_SIZE,
-                             logical_pg, 0, back_store_fname);
+                             logical_pg, 0, back_store);
         page_table->table[logical_pg].frame_no = page_table->next_frame;
         page_table->table[logical_pg].valid = 1;
         page_table->table[logical_pg].dirty = 0;
@@ -257,6 +251,13 @@ int main (int argc, char** argv) {
         exit(-1);
     }
     
+    //create fp and open file, perform error checking
+    FILE * bfp = fopen(back_store_fname,"r+");
+    if(!bfp) {
+        fprintf(stderr, "Back store file failed to open! Exiting program...\n");
+        exit(-1);
+    }
+    
     //create TLB
     struct TlbFifo tlb_fifo;
     tlb_fifo.tlb = (struct TLBE *) calloc(NUM_TLB_ENTRIES, sizeof(struct TLBE));
@@ -290,7 +291,7 @@ int main (int argc, char** argv) {
         int offset = logical_addr & 0xFF;
         int logical_pg = (logical_addr >> 8) & 0xFF;
         
-        struct PTE* pte = get_table_entry(logical_pg, &tlb_fifo, &page_table, physical_mem, back_store_fname);
+        struct PTE* pte = get_table_entry(logical_pg, &tlb_fifo, &page_table, physical_mem, bfp);
         int physical_addr = (pte->frame_no * PAGE_SIZE + offset) % (NUM_FRAMES * PAGE_SIZE);//TODO: physical_addr can only reach half
         //printf("Physical address: %d\n", physical_addr);
         //TODO: need to use % above to loop back around in physical address
@@ -310,6 +311,7 @@ int main (int argc, char** argv) {
         fscanf(afp, "%d", &entry);
     }
     fclose(afp);
+    fclose(bfp);
     
     printf("Page-fault rate: %f\n", page_table.num_faults / (double)num_entries);
     printf("TLB hit rate: %f\n", tlb_fifo.num_hits / (double)num_entries);
