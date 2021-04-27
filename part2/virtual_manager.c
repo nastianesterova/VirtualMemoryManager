@@ -33,6 +33,40 @@ const int PAGE_SIZE = 256;
 const int NUM_FRAMES = 128;
 const int NUM_TLB_ENTRIES = 16;
 
+
+/**
+ This function reads/writes pages to file
+ */
+void read_write_page_data(void* memory, int page_num, int is_write, const char* filename) {
+    FILE * fh = fopen(filename, is_write ? "r+" : "r");
+    if (!fh) {
+        fprintf(stderr, "Cannot open file %s for %s\n", filename, is_write ? "writing" : "reading");
+        exit(-1);
+    }
+    if (fseek(fh, page_num * PAGE_SIZE, SEEK_SET)) {
+        fprintf(stderr, "Cannot seek to %d in %s: %s\n", page_num * PAGE_SIZE, filename, strerror(errno));
+        exit(-1);
+    }
+
+    if (is_write) {
+        // printf("Writing page 0x%04X\n", page_num * PAGE_SIZE);
+        int c = fwrite(memory, PAGE_SIZE, 1, fh);
+        if (c != 1) {
+            fprintf(stderr, "Cannot write to %s: %s\n", filename, strerror(errno));
+            exit(-1);
+        }
+    } else {
+        // printf("Reading page 0x%04X\n", page_num * PAGE_SIZE);
+        int c = fread(memory, PAGE_SIZE, 1, fh);
+        if (c != 1) {
+            fprintf(stderr, "Cannot read from %s: %s\n", filename, strerror(errno));
+            exit(-1);
+        }
+    }
+    fclose(fh);
+}
+
+
 /**
  This function checks TLB in circular fashion and returns index into TLB if page number is found,
  otherwise returns -1.
@@ -50,6 +84,16 @@ int tlb_find_entry(struct TlbFifo* tlb_table, int logical_pg) {
         }
     }
     return -1;
+}
+
+/**
+ Returns the last entry from TLB
+ parameters:
+ struct TlbFifo* tlb_table: TLB from which last entry must be retrieved using modular arithmetic
+ */
+struct TLBE* tlb_get_last_entry(struct TlbFifo* tlb_table) {
+    int index = (tlb_table->first + tlb_table->size - 1) % NUM_TLB_ENTRIES;
+    return &tlb_table->tlb[index];
 }
 
 /**
@@ -73,14 +117,32 @@ struct TLBE tlb_add_entry(struct TlbFifo* tlb_table, int logical_pg, struct PTE 
     return old;
 }
 
-/**
- Returns the last entry from TLB
- parameters:
- struct TlbFifo* tlb_table: TLB from which last entry must be retrieved using modular arithmetic
- */
-struct TLBE* tlb_get_last_entry(struct TlbFifo* tlb_table) {
-    int index = (tlb_table->first + tlb_table->size - 1) % NUM_TLB_ENTRIES;
-    return &tlb_table->tlb[index];
+void tlb_remove_entry(struct TlbFifo* tlb_table, int logical_pg) {
+    struct TLBE * tlb = tlb_table->tlb;
+    int swap_index = -1;
+    for (int i = 0; i < tlb_table->size; i++) {
+        int index = (tlb_table->first + i) % NUM_TLB_ENTRIES;
+        if(tlb[index].pte.valid && tlb[index].page_no == logical_pg) {
+            swap_index = index;
+            //printf("Removing from TLB page 0x%02X index %d tlb size %d\n",
+            //       logical_pg, i, tlb_table->size);
+            continue;
+        }
+        if (swap_index >=0) {
+            tlb[swap_index] = tlb[index];
+            swap_index = index;
+        }
+    }
+    if (swap_index >= 0) {
+        // Clear last entry
+        struct TLBE * entry = tlb_get_last_entry(tlb_table);
+        entry->page_no = 0;
+        entry->pte.frame_no = 0;
+        entry->pte.valid = 0;
+        entry->pte.dirty = 0;
+
+        tlb_table->size--;
+    }
 }
 
 /**
@@ -97,7 +159,8 @@ struct TLBE* tlb_get_last_entry(struct TlbFifo* tlb_table) {
 struct PTE* get_table_entry(int logical_pg,
                            struct TlbFifo* tlb_table,
                            struct PageTable* page_table,
-                           char* physical_mem, FILE* bfp) {
+                           char* physical_mem,
+                           const char* back_store_fname) {
     
     int tlb_index = tlb_find_entry(tlb_table, logical_pg);
     if (tlb_index >= 0) {
@@ -139,38 +202,23 @@ struct PTE* get_table_entry(int logical_pg,
                    page_table->table[i].valid) { //found associate page #
                     if(page_table->table[i].dirty) {
                         //will need to write the frame to the BACKING STORE
-                        if(i == 0x57) {
-                            char x = *(physical_mem + page_table->next_frame * PAGE_SIZE + 0x9B);
-                            printf("Saving page 0x%02X frame 0x%02X value at 9B: %d\n", i,
-                                   page_table->next_frame,
-                                   (int)x);
-                        }
-                        fseek(bfp, i * PAGE_SIZE, SEEK_SET);
-                        int c = fwrite(physical_mem + page_table->next_frame * PAGE_SIZE,
-                                       PAGE_SIZE, 1, bfp);
-                        if (c < PAGE_SIZE) {
-                            fprintf(stderr, "Cannot write page: %s\n", strerror(errno));
-                            exit(-1);
-                        }
+                        read_write_page_data(physical_mem + page_table->next_frame * PAGE_SIZE,
+                                             i, 1, back_store_fname);
                         page_table->table[i].dirty = 0;
                     }
                     //remove page_table->next_frame from physical memory
                     page_table->table[i].valid = 0;
                     page_table->table[i].frame_no = -1;
+                    // remove logical page from tlb
+                    tlb_remove_entry(tlb_table, i);
                     break;
                 }
             }
         }
 
         // We have a free frame to load page to
-        fseek(bfp, logical_pg * PAGE_SIZE, SEEK_SET);
-        fread(physical_mem + page_table->next_frame * PAGE_SIZE,
-              PAGE_SIZE, 1, bfp);
-        if (logical_pg == 0x57) {
-            char x = *(physical_mem + page_table->next_frame * PAGE_SIZE + 0x9B);
-            printf("Loading page 0x%02X into frame 0x%02X value at 9B: %d\n", logical_pg,
-                   page_table->next_frame, (int)x);
-        }
+        read_write_page_data(physical_mem + page_table->next_frame * PAGE_SIZE,
+                             logical_pg, 0, back_store_fname);
         page_table->table[logical_pg].frame_no = page_table->next_frame;
         page_table->table[logical_pg].valid = 1;
         page_table->table[logical_pg].dirty = 0;
@@ -181,7 +229,7 @@ struct PTE* get_table_entry(int logical_pg,
     //update tlb
     struct TLBE old_tlb_entry = tlb_add_entry(tlb_table, logical_pg, page_table->table[logical_pg]);
     // if removed tlb entry is dirty, we update page table
-    if (old_tlb_entry.pte.dirty) {
+    if (old_tlb_entry.pte.valid && old_tlb_entry.pte.dirty) {
         page_table->table[old_tlb_entry.page_no].dirty = 1;
     }
     
@@ -206,12 +254,6 @@ int main (int argc, char** argv) {
     FILE * afp = fopen(addresses_fname,"r");
     if(!afp) {
         fprintf(stderr, "Address file failed to open! Exiting program...\n");
-        exit(-1);
-    }
-    
-    FILE * bfp = fopen(back_store_fname, "w+");
-    if(!bfp) {
-        fprintf(stderr, "Binary store file failed to open! Exiting program...\n");
         exit(-1);
     }
     
@@ -248,7 +290,7 @@ int main (int argc, char** argv) {
         int offset = logical_addr & 0xFF;
         int logical_pg = (logical_addr >> 8) & 0xFF;
         
-        struct PTE* pte = get_table_entry(logical_pg, &tlb_fifo, &page_table, physical_mem, bfp);
+        struct PTE* pte = get_table_entry(logical_pg, &tlb_fifo, &page_table, physical_mem, back_store_fname);
         int physical_addr = (pte->frame_no * PAGE_SIZE + offset) % (NUM_FRAMES * PAGE_SIZE);//TODO: physical_addr can only reach half
         //printf("Physical address: %d\n", physical_addr);
         //TODO: need to use % above to loop back around in physical address
@@ -267,13 +309,12 @@ int main (int argc, char** argv) {
         
         fscanf(afp, "%d", &entry);
     }
-	fclose(afp);
-    fclose(bfp);
+    fclose(afp);
     
     printf("Page-fault rate: %f\n", page_table.num_faults / (double)num_entries);
     printf("TLB hit rate: %f\n", tlb_fifo.num_hits / (double)num_entries);
     for(int i = 0; i < NUM_PAGES; ++i) {
-        num_dirty += page_table.table[i].dirty;
+        num_dirty += page_table.table[i].valid && page_table.table[i].dirty;
     }
     printf("Number of dirty pages: %d\n", num_dirty);
     
