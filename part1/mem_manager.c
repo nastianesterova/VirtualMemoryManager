@@ -125,7 +125,7 @@ struct PTE* get_table_entry(int logical_pg,
     //update tlb
     struct TLBE old_tlb_entry = tlb_add_entry(tlb_table, logical_pg, page_table->table[logical_pg]);
     // if removed tlb entry is dirty, we update page table
-    if (old_tlb_entry.pte.dirty) {
+    if (old_tlb_entry.pte.valid && old_tlb_entry.pte.dirty) {
         page_table->table[old_tlb_entry.page_no].dirty = 1;
     }
     
@@ -213,7 +213,7 @@ int main (int argc, char** argv) {
     printf("Page-fault rate: %f\n", page_table.num_faults / (double)num_entries);
     printf("TLB hit rate: %f\n", tlb_fifo.num_hits / (double)num_entries);
     for(int i = 0; i < NUM_PAGES; ++i) {
-        num_dirty += page_table.table[i].dirty;
+        num_dirty += (page_table.table[i].dirty && page_table.table[i].valid);
     }
     printf("Number of dirty pages: %d\n", num_dirty);
     

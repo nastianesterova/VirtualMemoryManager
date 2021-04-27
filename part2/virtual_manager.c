@@ -39,7 +39,8 @@ const int NUM_TLB_ENTRIES = 16;
  */
 void read_write_page_data(void* memory, int page_num, int is_write, FILE * fh) {
     if (fseek(fh, page_num * PAGE_SIZE, SEEK_SET)) {
-        fprintf(stderr, "Cannot seek to %d in %s: %s\n", page_num * PAGE_SIZE, fh, strerror(errno));
+        fprintf(stderr, "Cannot seek to %d in back store: %s\n",
+                page_num * PAGE_SIZE, strerror(errno));
         exit(-1);
     }
 
@@ -47,14 +48,16 @@ void read_write_page_data(void* memory, int page_num, int is_write, FILE * fh) {
         // printf("Writing page 0x%04X\n", page_num * PAGE_SIZE);
         int c = fwrite(memory, PAGE_SIZE, 1, fh);
         if (c != 1) {
-            fprintf(stderr, "Cannot write to %s: %s\n", fh, strerror(errno));
+            fprintf(stderr, "Cannot write to back store: %s\n",
+                    strerror(errno));
             exit(-1);
         }
     } else {
         // printf("Reading page 0x%04X\n", page_num * PAGE_SIZE);
         int c = fread(memory, PAGE_SIZE, 1, fh);
         if (c != 1) {
-            fprintf(stderr, "Cannot read from %s: %s\n", fh, strerror(errno));
+            fprintf(stderr, "Cannot read from back store: %s\n",
+                    strerror(errno));
             exit(-1);
         }
     }
